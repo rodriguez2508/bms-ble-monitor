@@ -74,9 +74,15 @@ class BleakBmsRepository(BmsRepository):
         if os.path.exists(path):
             with open(path, newline="") as f:
                 rows = list(csv.reader(f))
-            for ts, val in rows[-limit:]:
-                try: points.append({"ts": ts, "value": float(val)})
-                except ValueError: pass
+            for row in rows[-limit:]:
+                try:
+                    ts, val = row
+                except ValueError:
+                    continue
+                try:
+                    points.append({"ts": ts, "value": float(val)})
+                except ValueError:
+                    continue
         return points
 
     def _crc_modbus(self, data: bytes) -> int:
