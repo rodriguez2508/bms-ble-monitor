@@ -152,7 +152,7 @@ class BleakBmsRepository(BmsRepository):
             if base + i * 2 + 2 <= len(data):
                 mv = struct.unpack_from(">H", data, base + i * 2)[0]
                 cells.append(mv / 1000)
-        return BmsReading(current_a=reg_signed(0) / 100, voltage_v=reg(1) / 100, soc_pct=reg(2), soh_pct=reg(3), cap_remain_ah=reg(4) / 100, cap_design_ah=reg(5) // 100, cycles=reg(7), cell_voltages_v=cells)
+        return BmsReading(current_a=reg_signed(0) / 100, voltage_v=reg(1) / 100, soc_pct=reg(2), soh_pct=reg(3), cap_remain_ah=reg(4) / 100, cap_design_ah=reg(5) / 100, cycles=reg(7), cell_voltages_v=cells)
 
     def _save_reading(self, name: str, value: float):
         os.makedirs(config.DATA_DIR, exist_ok=True)

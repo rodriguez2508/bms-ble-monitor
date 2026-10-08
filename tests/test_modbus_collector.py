@@ -92,6 +92,8 @@ def test_parse_status_reads_pack_and_cell_voltages():
     assert reading.voltage_v == 13.3
     assert reading.soc_pct == 69
     assert reading.cycles == 134
+    assert reading.cap_remain_ah == 57.11
+    assert reading.cap_design_ah == 82.25
     assert [round(v, 3) for v in reading.cell_voltages_v] == [3.327, 3.328, 3.328, 3.324]
 
 

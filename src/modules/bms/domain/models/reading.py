@@ -9,7 +9,7 @@ class BmsReading:
     soc_pct: float
     soh_pct: float
     cap_remain_ah: float
-    cap_design_ah: int
+    cap_design_ah: float
     cycles: int
     cell_voltages_v: List[float] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
