@@ -82,9 +82,28 @@ class BleakBmsRepository(BmsRepository):
         self._is_connected = False
         self._lock = threading.Lock()
         self._stop_event = asyncio.Event()
+        self._client: Optional[BleakClient] = None
 
     async def connect(self) -> bool: return True
-    async def disconnect(self) -> None: self._stop_event.set()
+
+    def request_stop(self) -> None:
+        # Signal the polling loop to stop. Call it on the BLE event loop
+        # (e.g. via loop.call_soon_threadsafe) since asyncio.Event is not thread-safe.
+        self._stop_event.set()
+
+    async def disconnect(self) -> None:
+        # Release the BLE link so the BMS resumes advertising; otherwise it stays
+        # connected and the next start fails to find it ("no encontrado").
+        self._stop_event.set()
+        client = self._client
+        if client is not None:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception as e:
+                print(f"[BLE] Error al desconectar: {type(e).__name__}: {e!r}")
+        self._client = None
+        self._is_connected = False
 
     async def get_latest_reading(self) -> Optional[BmsReading]:
         with self._lock: return self._latest_reading
@@ -151,6 +170,7 @@ class BleakBmsRepository(BmsRepository):
                 if not device: raise BleakError("BMS no encontrado")
                 collector = ModbusCollector(config.BMS_SLAVE_ADDR)
                 async with BleakClient(device, timeout=20.0) as client:
+                    self._client = client
                     print(f"[BLE] Conectado a BMS BUKUNGO")
                     # MTU is best-effort only: on Linux/bleak 3.0.1 it cannot be negotiated
                     # (request_mtu was removed, BlueZ reports 23). Its failure must never
@@ -173,6 +193,9 @@ class BleakBmsRepository(BmsRepository):
                             self._save_reading("current", reading.current_a)
                             self._save_reading("soc",     reading.soc_pct)
                         await asyncio.sleep(config.BMS_POLLING_INTERVAL)
+                # Reached only when the with-block exits cleanly (client disconnected).
+                self._client = None
+                self._is_connected = False
             except Exception as e:
                 print(f"[BLE] Error: {type(e).__name__}: {e!r}. Reintentando en {backoff}s...")
                 self._is_connected = False

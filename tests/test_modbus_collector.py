@@ -95,6 +95,30 @@ def test_parse_status_reads_pack_and_cell_voltages():
     assert [round(v, 3) for v in reading.cell_voltages_v] == [3.327, 3.328, 3.328, 3.324]
 
 
+def test_disconnect_releases_the_ble_client():
+    # On shutdown the active client must be disconnected, otherwise the BMS stays
+    # connected, stops advertising and the next start reports "no encontrado".
+    repo = BleakBmsRepository()
+
+    class FakeClient:
+        def __init__(self):
+            self.is_connected = True
+            self.disconnected = False
+
+        async def disconnect(self):
+            self.disconnected = True
+            self.is_connected = False
+
+    fake = FakeClient()
+    repo._client = fake
+
+    asyncio.run(repo.disconnect())
+
+    assert fake.disconnected is True
+    assert repo._client is None
+    assert repo._is_connected is False
+
+
 def test_request_timeout_clears_residual_so_next_frame_assembles():
     # Criterion 4: after a timeout the residual is dropped and the next frame is fine.
     collector = ModbusCollector(SLAVE)
