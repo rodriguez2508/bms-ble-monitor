@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMS Dashboard — LiFePO4</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #171e2e;
+    --border: #263049;
+    --text: #e6ebf5;
+    --muted: #8b96ad;
+    --accent: #4da3ff;
+    --ok: #39d98a;
+    --bad: #ff6b6b;
+    --warn: #ffc857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .badge {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .badge.on  { color: var(--ok);   border-color: var(--ok); }
+  .badge.off { color: var(--bad);  border-color: var(--bad); }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 26px; font-weight: 600; margin-top: 6px; }
+  .card .unit  { font-size: 13px; color: var(--muted); margin-left: 4px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tabs { display: flex; gap: 8px; }
+  .tabs button {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tabs button.active { color: var(--text); border-color: var(--accent); background: rgba(77,163,255,.12); }
+  canvas { width: 100%; height: 260px; display: block; }
+  .cells { display: flex; gap: 8px; flex-wrap: wrap; }
+  .cell {
+    flex: 1 1 90px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    text-align: center;
+  }
+  .cell .n { font-size: 11px; color: var(--muted); }
+  .cell .v { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0 24px; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>BMS Dashboard — LiFePO4</h1>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <span id="last-update" class="muted" style="font-size:12px;"></span>
+    <span id="conn-badge" class="badge off">desconectado</span>
+  </div>
+</header>
+
+<main>
+  <section class="cards" id="cards">
+    <div class="card"><div class="label">Voltaje</div><div class="value"><span id="v-voltage">—</span><span class="unit">V</span></div></div>
+    <div class="card"><div class="label">Corriente</div><div class="value"><span id="v-current">—</span><span class="unit">A</span></div></div>
+    <div class="card"><div class="label">SOC</div><div class="value"><span id="v-soc">—</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">SOH</div><div class="value"><span id="v-soh">—</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">Cap. restante</div><div class="value"><span id="v-cap">—</span><span class="unit">Ah</span></div></div>
+    <div class="card"><div class="label">Ciclos</div><div class="value"><span id="v-cycles">—</span></div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Voltajes de celda</h2>
+      <span id="cell-info" class="muted" style="font-size:12px;"></span>
+    </div>
+    <div class="cells" id="cells"><span class="muted">Sin datos</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Historial</h2>
+      <div class="tabs" id="metric-tabs">
+        <button data-metric="voltage" class="active">Voltaje</button>
+        <button data-metric="current">Corriente</button>
+        <button data-metric="soc">SOC</button>
+      </div>
+    </div>
+    <canvas id="chart" width="1040" height="260"></canvas>
+    <div id="chart-info" class="muted" style="font-size:12px; margin-top:8px;"></div>
+  </section>
+</main>
+
+<footer>GET /api/status · GET /api/history/{voltage|current|soc}?limit=N — auto-refresh 2s / 10s</footer>
+
+<script>
+"use strict";
+const METRIC_LABEL = { voltage: "Voltaje (V)", current: "Corriente (A)", soc: "SOC (%)" };
+let activeMetric = "voltage";
+
+function fmt(x, digits) {
+  if (x === null || x === undefined || Number.isNaN(x)) return "—";
+  return Number(x).toFixed(digits);
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
+  return res.json();
+}
+
+function setBadge(connected) {
+  const badge = document.getElementById("conn-badge");
+  badge.textContent = connected ? "conectado" : "desconectado";
+  badge.className = "badge " + (connected ? "on" : "off");
+}
+
+function renderStatus(payload) {
+  setBadge(payload.connected);
+  const d = payload.data;
+  if (!d) {
+    ["v-voltage", "v-current", "v-soc", "v-soh", "v-cap", "v-cycles"].forEach(id => {
+      document.getElementById(id).textContent = "—";
+    });
+    document.getElementById("cells").innerHTML = '<span class="muted">Sin datos</span>';
+    document.getElementById("cell-info").textContent = "";
+    document.getElementById("last-update").textContent = "sin lecturas";
+    return;
+  }
+  document.getElementById("v-voltage").textContent = fmt(d.voltage_V, 2);
+  document.getElementById("v-current").textContent = fmt(d.current_A, 2);
+  document.getElementById("v-soc").textContent = fmt(d.soc_pct, 0);
+  document.getElementById("v-soh").textContent = fmt(d.soh_pct, 0);
+  document.getElementById("v-cap").textContent = fmt(d.cap_remain_Ah, 1) + " / " + fmt(d.cap_design_Ah, 0);
+  document.getElementById("v-cycles").textContent = fmt(d.cycles, 0);
+  document.getElementById("last-update").textContent = "última lectura: " + (d.ts || "—");
+
+  const cells = d.cell_voltages_V || [];
+  const box = document.getElementById("cells");
+  if (cells.length === 0) {
+    box.innerHTML = '<span class="muted">Sin datos</span>';
+    document.getElementById("cell-info").textContent = "";
+  } else {
+    box.innerHTML = cells.map((v, i) =>
+      '<div class="cell"><div class="n">C' + (i + 1) + '</div><div class="v">' + fmt(v, 3) + ' V</div></div>'
+    ).join("");
+    const min = Math.min.apply(null, cells);
+    const max = Math.max.apply(null, cells);
+    document.getElementById("cell-info").textContent =
+      cells.length + " celdas · min " + fmt(min, 3) + " V · max " + fmt(max, 3) +
+      " V · Δ " + fmt(max - min, 3) + " V";
+  }
+}
+
+function drawChart(points) {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const padL = 56, padR = 12, padT = 14, padB = 28;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!points || points.length === 0) {
+    ctx.fillStyle = "#8b96ad";
+    ctx.font = "13px system-ui";
+    ctx.fillText("Sin datos en el historial", padL, H / 2);
+    document.getElementById("chart-info").textContent = "";
+    return;
+  }
+
+  const vals = points.map(p => p.value);
+  let min = Math.min.apply(null, vals);
+  let max = Math.max.apply(null, vals);
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  min -= span * 0.08;
+  max += span * 0.08;
+
+  const x = i => padL + (points.length === 1 ? 0 : (i / (points.length - 1)) * (W - padL - padR));
+  const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+
+  ctx.strokeStyle = "#263049";
+  ctx.fillStyle = "#8b96ad";
+  ctx.font = "11px system-ui";
+  ctx.lineWidth = 1;
+  const ticks = 4;
+  for (let t = 0; t <= ticks; t++) {
+    const v = min + (t / ticks) * (max - min);
+    const yy = y(v);
+    ctx.beginPath();
+    ctx.moveTo(padL, yy);
+    ctx.lineTo(W - padR, yy);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(2), 6, yy + 4);
+  }
+
+  ctx.strokeStyle = "#4da3ff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const px = x(i), py = y(p.value);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = "#8b96ad";
+  ctx.fillText(points[0].ts || "", padL, H - 8);
+  const last = points[points.length - 1].ts || "";
+  ctx.fillText(last, W - padR - ctx.measureText(last).width, H - 8);
+
+  document.getElementById("chart-info").textContent =
+    METRIC_LABEL[activeMetric] + " · " + points.length + " puntos · " +
+    "min " + Math.min.apply(null, vals).toFixed(3) + " · " +
+    "max " + Math.max.apply(null, vals).toFixed(3);
+}
+
+async function refreshStatus() {
+  try {
+    renderStatus(await fetchJSON("/api/status"));
+  } catch (e) {
+    setBadge(false);
+    document.getElementById("last-update").textContent = "API no disponible";
+  }
+}
+
+async function refreshHistory() {
+  try {
+    const payload = await fetchJSON("/api/history/" + activeMetric + "?limit=200");
+    drawChart(payload.points || []);
+  } catch (e) {
+    drawChart([]);
+    document.getElementById("chart-info").textContent = "API no disponible";
+  }
+}
+
+document.getElementById("metric-tabs").addEventListener("click", ev => {
+  const btn = ev.target.closest("button[data-metric]");
+  if (!btn) return;
+  activeMetric = btn.dataset.metric;
+  document.querySelectorAll("#metric-tabs button").forEach(b => b.classList.toggle("active", b === btn));
+  refreshHistory();
+});
+
+refreshStatus();
+refreshHistory();
+setInterval(refreshStatus, 2000);
+setInterval(refreshHistory, 10000);
+</script>
+</body>
+</html>

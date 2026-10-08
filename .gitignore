@@ -4,3 +4,4 @@ __pycache__/
 data/
 node_modules
 .pi/
+.fleet-lock

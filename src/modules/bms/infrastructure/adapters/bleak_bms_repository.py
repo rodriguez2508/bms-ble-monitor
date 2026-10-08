@@ -69,6 +69,7 @@ class BleakBmsRepository(BmsRepository):
         filename_map = {"voltage": "voltage_history.csv", "current": "current_history.csv", "soc": "soc_history.csv"}
         filename = filename_map.get(metric)
         if not filename: return []
+        if limit <= 0: return []
         path = os.path.join(config.DATA_DIR, filename)
         points = []
         if os.path.exists(path):

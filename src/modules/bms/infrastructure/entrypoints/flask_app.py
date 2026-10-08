@@ -1,24 +1,35 @@
-from flask import Flask, jsonify, request
+import os
+
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 
 from src.modules.bms.application.queries.get_status_handler import GetBmsStatusQuery, GetBmsStatusHandler
 from src.modules.bms.application.queries.get_history_handler import GetBmsHistoryQuery, GetBmsHistoryHandler
 
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
 def create_app(repository):
     app = Flask(__name__)
     CORS(app)
     sock = Sock(app)
-    
+
     status_handler = GetBmsStatusHandler(repository)
     history_handler = GetBmsHistoryHandler(repository)
-    
+
     _clients = set()
+
+    @app.route("/")
+    @app.route("/dashboard")
+    def dashboard():
+        return send_from_directory(STATIC_DIR, "index.html", mimetype="text/html")
 
     @app.route("/api/status")
     async def get_status():
         reading = await status_handler.execute(GetBmsStatusQuery())
-        if not reading: return jsonify({"connected": False, "data": None})
+        if not reading:
+            return jsonify({"connected": False, "data": None})
         return jsonify({"connected": True, "data": reading.to_dict()})
 
     @app.route("/api/history/<metric>")
@@ -31,8 +42,11 @@ def create_app(repository):
     def ws_endpoint(ws):
         _clients.add(ws)
         try:
-            while True: ws.receive()
-        except Exception: pass
-        finally: _clients.discard(ws)
+            while True:
+                ws.receive()
+        except Exception:
+            pass
+        finally:
+            _clients.discard(ws)
 
     return app
