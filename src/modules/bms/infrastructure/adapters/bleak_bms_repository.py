@@ -9,6 +9,8 @@ from typing import Optional, List
 from bleak import BleakClient, BleakScanner, BleakError
 from src.modules.bms.domain.ports.bms_repository import BmsRepository
 from src.modules.bms.domain.models.reading import BmsReading
+from src.modules.bms.domain.models.config import BmsConfig
+from src.modules.bms.infrastructure.adapters.balance_log import BalanceLog
 from src.modules.shared.infrastructure.config.config import config
 
 UUID_TX = "00002760-08c2-11e1-9073-0e8ac72e0001"
@@ -16,6 +18,11 @@ UUID_RX = "00002760-08c2-11e1-9073-0e8ac72e0002"
 FUNC_READ = 0x03
 REG_STATUS_START = 0x0000
 REG_STATUS_COUNT = 0x003B
+# Parameter/threshold block. This firmware shifts the PACE parameter map by +23
+# registers, so the read covers registers 83..137 inclusive.
+REG_PARAM_START = 83
+REG_PARAM_COUNT = 55
+PARAM_REFRESH_POLLS = 10  # refresh cached thresholds every N status polls
 
 class ModbusCollector:
     """Reassembles a Modbus RTU response that BLE delivers fragmented.
@@ -79,10 +86,19 @@ class ModbusCollector:
 class BleakBmsRepository(BmsRepository):
     def __init__(self):
         self._latest_reading: Optional[BmsReading] = None
+        self._config: Optional[BmsConfig] = None
         self._is_connected = False
         self._lock = threading.Lock()
         self._stop_event = asyncio.Event()
         self._client: Optional[BleakClient] = None
+        self._balance_log: Optional[BalanceLog] = (
+            BalanceLog(
+                os.path.join(config.DATA_DIR, config.BALANCE_LOG_FILE),
+                config.BALANCE_LOG_RETENTION_H,
+            )
+            if config.BALANCE_LOG_ENABLED
+            else None
+        )
 
     async def connect(self) -> bool: return True
 
@@ -108,8 +124,17 @@ class BleakBmsRepository(BmsRepository):
     async def get_latest_reading(self) -> Optional[BmsReading]:
         with self._lock: return self._latest_reading
 
+    async def get_config(self) -> Optional[BmsConfig]:
+        with self._lock: return self._config
+
+    async def get_balance_log(self, limit: int) -> List[dict]:
+        if self._balance_log is None:
+            return []
+        return self._balance_log.read(limit)
+
     async def get_history(self, metric: str, limit: int) -> List[dict]:
-        filename_map = {"voltage": "voltage_history.csv", "current": "current_history.csv", "soc": "soc_history.csv"}
+        filename_map = {"voltage": "voltage_history.csv", "current": "current_history.csv",
+                        "soc": "soc_history.csv", "power": "power_history.csv"}
         filename = filename_map.get(metric)
         if not filename: return []
         if limit <= 0: return []
@@ -145,6 +170,8 @@ class BleakBmsRepository(BmsRepository):
     def _parse_status(self, data: bytes) -> BmsReading:
         def reg(offset: int) -> int: return struct.unpack_from(">H", data, offset * 2)[0]
         def reg_signed(offset: int) -> int: return struct.unpack_from(">h", data, offset * 2)[0]
+        def has(offset: int) -> bool: return offset * 2 + 2 <= len(data)
+
         cells = []
         cell_count = reg(15) & 0xFF if len(data) > 31 else 0
         base = 32  # cell voltages start at register 16 (byte 32), big-endian millivolts
@@ -152,7 +179,60 @@ class BleakBmsRepository(BmsRepository):
             if base + i * 2 + 2 <= len(data):
                 mv = struct.unpack_from(">H", data, base + i * 2)[0]
                 cells.append(mv / 1000)
-        return BmsReading(current_a=reg_signed(0) / 100, voltage_v=reg(1) / 100, soc_pct=reg(2), soh_pct=reg(3), cap_remain_ah=reg(4) / 100, cap_design_ah=reg(5) / 100, cycles=reg(7), cell_voltages_v=cells)
+
+        # Temperatures are 0.1 C. The published map puts them at reg32..37, but this
+        # firmware reports the live values at reg47 and reg57; we surface whichever
+        # registers actually carry a reading (0 means "no sensor").
+        cell_temps = [reg_signed(o) / 10 for o in range(32, 36) if has(o) and reg_signed(o) != 0]
+        mosfet_temp = reg_signed(36) / 10 if has(36) and reg_signed(36) != 0 else 0.0
+        ambient_temp = reg_signed(37) / 10 if has(37) and reg_signed(37) != 0 else 0.0
+        extra_temps = [reg_signed(o) / 10 for o in (47, 57) if has(o) and reg_signed(o) != 0]
+
+        voltage_v = reg(1) / 100
+        current_a = reg_signed(0) / 100
+        return BmsReading(
+            current_a=current_a,
+            voltage_v=voltage_v,
+            soc_pct=reg(2),
+            soh_pct=reg(3),
+            cap_remain_ah=reg(4) / 100,
+            cap_design_ah=reg(5) / 100,
+            cycles=reg(7),
+            cell_voltages_v=cells,
+            cell_temperatures_c=cell_temps,
+            mosfet_temperature_c=mosfet_temp,
+            ambient_temperature_c=ambient_temp,
+            extra_temperatures_c=extra_temps,
+            balance_status=reg(12) if has(12) else 0,
+            warning_flags=reg(9) if has(9) else 0,
+            protection_flags=reg(10) if has(10) else 0,
+            status_flags=reg(11) if has(11) else 0,
+            power_w=voltage_v * current_a,
+        )
+
+    def _parse_config(self, data: bytes) -> BmsConfig:
+        def reg(regno: int) -> int:
+            off = (regno - REG_PARAM_START) * 2
+            return struct.unpack_from(">H", data, off)[0]
+        raw = [reg(REG_PARAM_START + i) for i in range(REG_PARAM_COUNT)]
+        return BmsConfig(
+            pack_ov_alarm_v=reg(83) / 100,
+            pack_ov_protection_v=reg(84) / 100,
+            cell_ov_alarm_v=reg(87) / 1000,
+            cell_ov_protection_v=reg(88) / 1000,
+            pack_uv_protection_v=reg(92) / 100,
+            cell_uv_protection_v=reg(96) / 1000,
+            charge_oc_alarm_a=reg(99),
+            charge_oc_protection_a=reg(100),
+            charge_ot_alarm_c=reg(107) / 10,
+            balance_start_cell_v=reg(128) / 1000,
+            balance_start_delta_mv=reg(129),
+            pack_full_charge_v=reg(130) / 100,
+            cell_sleep_v=reg(132) / 1000,
+            cell_sleep_delay_min=reg(133),
+            soc_alarm_pct=reg(135),
+            raw_registers=raw,
+        )
 
     def _save_reading(self, name: str, value: float):
         os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -162,7 +242,10 @@ class BleakBmsRepository(BmsRepository):
 
     async def start_polling(self):
         cmd = self._build_read_cmd(config.BMS_SLAVE_ADDR, REG_STATUS_START, REG_STATUS_COUNT)
+        param_cmd = self._build_read_cmd(config.BMS_SLAVE_ADDR, REG_PARAM_START, REG_PARAM_COUNT)
+        log_every = max(1, round(config.BALANCE_LOG_INTERVAL / config.BMS_POLLING_INTERVAL))
         backoff = 5
+        polls = 0
         while not self._stop_event.is_set():
             try:
                 print(f"[BLE] Buscando {config.BMS_MAC_ADDRESS}...")
@@ -192,6 +275,20 @@ class BleakBmsRepository(BmsRepository):
                             self._save_reading("voltage", reading.voltage_v)
                             self._save_reading("current", reading.current_a)
                             self._save_reading("soc",     reading.soc_pct)
+                            self._save_reading("power",   reading.power_w)
+                            if self._balance_log is not None and polls % log_every == 0:
+                                reg13 = (
+                                    struct.unpack_from(">H", payload, 13 * 2)[0]
+                                    if len(payload) > 27
+                                    else 0
+                                )
+                                self._balance_log.append(reading, reg13)
+                        if polls % PARAM_REFRESH_POLLS == 0:
+                            pframe = await collector.request(client, param_cmd, timeout=6.0)
+                            if pframe:
+                                cfg = self._parse_config(pframe[3:-2])
+                                with self._lock: self._config = cfg
+                        polls += 1
                         await asyncio.sleep(config.BMS_POLLING_INTERVAL)
                 # Reached only when the with-block exits cleanly (client disconnected).
                 self._client = None

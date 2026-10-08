@@ -10,5 +10,10 @@ class Config:
     FLASK_PORT = int(os.getenv("FLASK_PORT", "8000"))
     FLASK_DEBUG = os.getenv("FLASK_DEBUG", "False").lower() == "true"
     DATA_DIR = "data"
+    # Charge/balance cycle log (written by the server while polling).
+    BALANCE_LOG_ENABLED = os.getenv("BALANCE_LOG_ENABLED", "true").lower() == "true"
+    BALANCE_LOG_INTERVAL = int(os.getenv("BALANCE_LOG_INTERVAL", "30"))
+    BALANCE_LOG_RETENTION_H = float(os.getenv("BALANCE_LOG_RETENTION_H", "48"))
+    BALANCE_LOG_FILE = os.getenv("BALANCE_LOG_FILE", "balance_cycle.csv")
 
 config = Config()

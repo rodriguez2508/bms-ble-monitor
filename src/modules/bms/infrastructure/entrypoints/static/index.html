@@ -58,6 +58,7 @@
   .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .card .value { font-size: 26px; font-weight: 600; margin-top: 6px; }
   .card .unit  { font-size: 13px; color: var(--muted); margin-left: 4px; }
+  .card .sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -94,9 +95,44 @@
     border-radius: 8px;
     padding: 8px 10px;
     text-align: center;
+    position: relative;
   }
   .cell .n { font-size: 11px; color: var(--muted); }
   .cell .v { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  .cell .bal {
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: #0f1420;
+    background: var(--warn);
+    border-radius: 6px;
+    padding: 1px 6px;
+  }
+  .alerts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .chip.warn { color: var(--warn); border-color: var(--warn); }
+  .chip.bad  { color: var(--bad);  border-color: var(--bad); }
+  .chip.info { color: var(--accent); border-color: var(--accent); }
+  .chip.ok   { color: var(--ok);   border-color: var(--ok); }
+  table.thresholds { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.thresholds td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  table.thresholds td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.data th {
+    text-align: left; color: var(--muted); font-weight: 600;
+    padding: 6px; border-bottom: 1px solid var(--border);
+    text-transform: uppercase; letter-spacing: .03em; font-size: 11px;
+  }
+  table.data td { padding: 5px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .table-scroll { overflow-x: auto; margin-top: 12px; }
   footer { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0 24px; }
   .muted { color: var(--muted); }
 </style>
@@ -105,6 +141,7 @@
 <header>
   <h1>BMS Dashboard — LiFePO4</h1>
   <div style="display:flex; gap:10px; align-items:center;">
+    <span id="link-badge" class="badge">—</span>
     <span id="last-update" class="muted" style="font-size:12px;"></span>
     <span id="conn-badge" class="badge off">desconectado</span>
   </div>
@@ -113,7 +150,8 @@
 <main>
   <section class="cards" id="cards">
     <div class="card"><div class="label">Voltaje</div><div class="value"><span id="v-voltage">—</span><span class="unit">V</span></div></div>
-    <div class="card"><div class="label">Corriente</div><div class="value"><span id="v-current">—</span><span class="unit">A</span></div></div>
+    <div class="card"><div class="label">Corriente</div><div class="value"><span id="v-current">—</span><span class="unit">A</span></div><div class="sub" id="v-current-dir"></div></div>
+    <div class="card"><div class="label">Potencia</div><div class="value"><span id="v-power">—</span><span class="unit">W</span></div></div>
     <div class="card"><div class="label">SOC</div><div class="value"><span id="v-soc">—</span><span class="unit">%</span></div></div>
     <div class="card"><div class="label">SOH</div><div class="value"><span id="v-soh">—</span><span class="unit">%</span></div></div>
     <div class="card"><div class="label">Cap. restante</div><div class="value"><span id="v-cap">—</span><span class="unit">Ah</span></div></div>
@@ -130,24 +168,92 @@
 
   <section class="panel">
     <div class="panel-head">
+      <h2>Temperaturas</h2>
+      <span id="temp-info" class="muted" style="font-size:12px;"></span>
+    </div>
+    <div class="cells" id="temps"><span class="muted">Sin datos</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Alarmas y estado</h2></div>
+    <div class="alerts" id="alerts"><span class="chip ok">sin alarmas</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Umbrales (solo lectura)</h2>
+      <span id="config-info" class="muted" style="font-size:12px;"></span>
+    </div>
+    <table class="thresholds" id="thresholds"><tbody><tr><td class="muted">Sin datos</td><td></td></tr></tbody></table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
       <h2>Historial</h2>
       <div class="tabs" id="metric-tabs">
         <button data-metric="voltage" class="active">Voltaje</button>
         <button data-metric="current">Corriente</button>
+        <button data-metric="power">Potencia</button>
         <button data-metric="soc">SOC</button>
       </div>
     </div>
     <canvas id="chart" width="1040" height="260"></canvas>
     <div id="chart-info" class="muted" style="font-size:12px; margin-top:8px;"></div>
   </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Ciclo de carga (balanceo)</h2>
+      <span id="balance-info" class="muted" style="font-size:12px;"></span>
+    </div>
+    <canvas id="balance-chart" width="1040" height="220"></canvas>
+    <div class="table-scroll">
+      <table class="data" id="balance-table"><tbody><tr><td class="muted">Sin datos</td></tr></tbody></table>
+    </div>
+  </section>
 </main>
 
-<footer>GET /api/status · GET /api/history/{voltage|current|soc}?limit=N — auto-refresh 2s / 10s</footer>
+<footer>GET /api/status · GET /api/config · GET /api/balance · GET /api/history/{voltage|current|power|soc}?limit=N · WS /ws — push 2s / historial 10s</footer>
 
 <script>
 "use strict";
-const METRIC_LABEL = { voltage: "Voltaje (V)", current: "Corriente (A)", soc: "SOC (%)" };
+const METRIC_LABEL = { voltage: "Voltaje (V)", current: "Corriente (A)", power: "Potencia (W)", soc: "SOC (%)" };
 let activeMetric = "voltage";
+
+const WARNING_BITS = {
+  0: "Celda sobrevoltaje", 1: "Celda bajo voltaje", 2: "Pack sobrevoltaje", 3: "Pack bajo voltaje",
+  4: "Sobrecorriente carga", 5: "Sobrecorriente descarga",
+  8: "Alta temp. carga", 9: "Alta temp. descarga", 10: "Baja temp. carga", 11: "Baja temp. descarga",
+  12: "Alta temp. ambiente", 13: "Baja temp. ambiente", 14: "Alta temp. MOSFET", 15: "SOC bajo"
+};
+const PROTECTION_BITS = {
+  0: "Celda sobrevoltaje", 1: "Celda bajo voltaje", 2: "Pack sobrevoltaje", 3: "Pack bajo voltaje",
+  4: "Sobrecorriente carga", 5: "Sobrecorriente descarga", 6: "Cortocircuito", 7: "Cargador sobrevoltaje",
+  8: "Alta temp. carga", 9: "Alta temp. descarga", 10: "Baja temp. carga", 11: "Baja temp. descarga",
+  12: "Alta temp. MOSFET", 13: "Alta temp. ambiente", 14: "Baja temp. ambiente"
+};
+const STATUS_BITS = {
+  0: "Falla MOSFET carga", 1: "Falla MOSFET descarga", 2: "Falla sensor temp.", 4: "Falla de celda",
+  5: "Falla muestreo", 8: "En carga", 9: "En descarga", 10: "MOSFET carga ON", 11: "MOSFET descarga ON",
+  12: "Limitador de carga ON", 14: "Cargador invertido", 15: "Calentador ON"
+};
+const THRESHOLD_ROWS = [
+  ["pack_ov_alarm_V", "Pack sobrevoltaje (alarma)", "V"],
+  ["pack_ov_protection_V", "Pack sobrevoltaje (protección)", "V"],
+  ["cell_ov_alarm_V", "Celda sobrevoltaje (alarma)", "V"],
+  ["cell_ov_protection_V", "Celda sobrevoltaje (protección)", "V"],
+  ["pack_uv_protection_V", "Pack bajo voltaje (protección)", "V"],
+  ["cell_uv_protection_V", "Celda bajo voltaje (protección)", "V"],
+  ["charge_oc_alarm_A", "Sobrecorriente carga (alarma)", "A"],
+  ["charge_oc_protection_A", "Sobrecorriente carga (protección)", "A"],
+  ["charge_ot_alarm_C", "Alta temp. carga (alarma)", "°C"],
+  ["balance_start_cell_V", "Inicio balanceo (celda)", "V"],
+  ["balance_start_delta_mV", "Delta de balanceo", "mV"],
+  ["pack_full_charge_V", "Pack carga completa", "V"],
+  ["cell_sleep_V", "Voltaje de reposo (celda)", "V"],
+  ["cell_sleep_delay_min", "Retardo reposo", "min"],
+  ["soc_alarm_pct", "Alarma SOC bajo", "%"]
+];
 
 function fmt(x, digits) {
   if (x === null || x === undefined || Number.isNaN(x)) return "—";
@@ -166,24 +272,66 @@ function setBadge(connected) {
   badge.className = "badge " + (connected ? "on" : "off");
 }
 
+function bitsToChips(value, map, cls) {
+  const chips = [];
+  for (const [bit, label] of Object.entries(map)) {
+    if ((value >> Number(bit)) & 1) chips.push('<span class="chip ' + cls + '">' + label + "</span>");
+  }
+  return chips;
+}
+
+function renderAlerts(d) {
+  const box = document.getElementById("alerts");
+  if (!d) { box.innerHTML = '<span class="muted">Sin datos</span>'; return; }
+  const chips = []
+    .concat(bitsToChips(d.warning_flags || 0, WARNING_BITS, "warn"))
+    .concat(bitsToChips(d.protection_flags || 0, PROTECTION_BITS, "bad"))
+    .concat(bitsToChips(d.status_flags || 0, STATUS_BITS, "info"));
+  box.innerHTML = chips.length ? chips.join("") : '<span class="chip ok">sin alarmas</span>';
+}
+
+function renderTemperatures(d) {
+  const box = document.getElementById("temps");
+  const info = document.getElementById("temp-info");
+  if (!d) { box.innerHTML = '<span class="muted">Sin datos</span>'; info.textContent = ""; return; }
+  const items = [];
+  (d.cell_temperatures_C || []).forEach((t, i) => items.push({ n: "Celda " + (i + 1), v: t }));
+  if (d.mosfet_temperature_C) items.push({ n: "MOSFET", v: d.mosfet_temperature_C });
+  if (d.ambient_temperature_C) items.push({ n: "Ambiente", v: d.ambient_temperature_C });
+  (d.extra_temperatures_C || []).forEach((t, i) => items.push({ n: "Sensor " + (i + 1), v: t, note: true }));
+  if (!items.length) { box.innerHTML = '<span class="muted">Sin datos</span>'; info.textContent = ""; return; }
+  box.innerHTML = items.map(it =>
+    '<div class="cell"><div class="n">' + it.n + '</div><div class="v">' + fmt(it.v, 1) +
+    ' °C</div>' + (it.note ? '<div class="n">sin confirmar</div>' : "") + "</div>"
+  ).join("");
+  const vals = items.map(i => i.v);
+  info.textContent = "min " + fmt(Math.min.apply(null, vals), 1) + " °C · max " +
+    fmt(Math.max.apply(null, vals), 1) + " °C";
+}
+
 function renderStatus(payload) {
   setBadge(payload.connected);
   const d = payload.data;
+  const ids = ["v-voltage", "v-current", "v-power", "v-soc", "v-soh", "v-cap", "v-cycles"];
   if (!d) {
-    ["v-voltage", "v-current", "v-soc", "v-soh", "v-cap", "v-cycles"].forEach(id => {
-      document.getElementById(id).textContent = "—";
-    });
+    ids.forEach(id => { document.getElementById(id).textContent = "—"; });
+    document.getElementById("v-current-dir").textContent = "";
     document.getElementById("cells").innerHTML = '<span class="muted">Sin datos</span>';
     document.getElementById("cell-info").textContent = "";
+    renderTemperatures(null);
+    renderAlerts(null);
     document.getElementById("last-update").textContent = "sin lecturas";
     return;
   }
   document.getElementById("v-voltage").textContent = fmt(d.voltage_V, 2);
   document.getElementById("v-current").textContent = fmt(d.current_A, 2);
+  document.getElementById("v-power").textContent = fmt(d.power_W, 1);
   document.getElementById("v-soc").textContent = fmt(d.soc_pct, 0);
   document.getElementById("v-soh").textContent = fmt(d.soh_pct, 0);
-  document.getElementById("v-cap").textContent = fmt(d.cap_remain_Ah, 1) + " / " + fmt(d.cap_design_Ah, 0);
+  document.getElementById("v-cap").textContent = fmt(d.cap_remain_Ah, 1) + " / " + fmt(d.cap_design_Ah, 1);
   document.getElementById("v-cycles").textContent = fmt(d.cycles, 0);
+  document.getElementById("v-current-dir").textContent =
+    d.current_A > 0.01 ? "cargando" : (d.current_A < -0.01 ? "descargando" : "en reposo");
   document.getElementById("last-update").textContent = "última lectura: " + (d.ts || "—");
 
   const cells = d.cell_voltages_V || [];
@@ -192,8 +340,10 @@ function renderStatus(payload) {
     box.innerHTML = '<span class="muted">Sin datos</span>';
     document.getElementById("cell-info").textContent = "";
   } else {
+    const bal = d.balance_status || 0;
     box.innerHTML = cells.map((v, i) =>
-      '<div class="cell"><div class="n">C' + (i + 1) + '</div><div class="v">' + fmt(v, 3) + ' V</div></div>'
+      '<div class="cell"><div class="n">C' + (i + 1) + '</div><div class="v">' + fmt(v, 3) +
+      ' V</div>' + (((bal >> i) & 1) ? '<div class="bal">BAL</div>' : "") + "</div>"
     ).join("");
     const min = Math.min.apply(null, cells);
     const max = Math.max.apply(null, cells);
@@ -201,6 +351,20 @@ function renderStatus(payload) {
       cells.length + " celdas · min " + fmt(min, 3) + " V · max " + fmt(max, 3) +
       " V · Δ " + fmt(max - min, 3) + " V";
   }
+
+  renderTemperatures(d);
+  renderAlerts(d);
+}
+
+function renderConfig(payload) {
+  const body = document.querySelector("#thresholds tbody");
+  const info = document.getElementById("config-info");
+  const d = payload.data;
+  if (!d) { body.innerHTML = '<tr><td class="muted">Sin datos</td><td></td></tr>'; info.textContent = ""; return; }
+  body.innerHTML = THRESHOLD_ROWS.map(([key, label, unit]) =>
+    "<tr><td>" + label + "</td><td>" + fmt(d[key], 2) + " " + unit + "</td></tr>"
+  ).join("");
+  info.textContent = "actualizado: " + new Date().toLocaleTimeString();
 }
 
 function drawChart(points) {
@@ -273,6 +437,14 @@ async function refreshStatus() {
   }
 }
 
+async function refreshConfig() {
+  try {
+    renderConfig(await fetchJSON("/api/config"));
+  } catch (e) {
+    renderConfig({ data: null });
+  }
+}
+
 async function refreshHistory() {
   try {
     const payload = await fetchJSON("/api/history/" + activeMetric + "?limit=200");
@@ -291,10 +463,187 @@ document.getElementById("metric-tabs").addEventListener("click", ev => {
   refreshHistory();
 });
 
+// --- Real-time link: WebSocket push with polling fallback ---
+let pollingTimer = null;
+let ws = null;
+let wsRetry = 1000;
+
+function setLink(label, cls) {
+  const b = document.getElementById("link-badge");
+  b.textContent = label;
+  b.className = "badge " + (cls || "");
+}
+
+function startPolling() {
+  if (!pollingTimer) pollingTimer = setInterval(refreshStatus, 2000);
+}
+function stopPolling() {
+  if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+}
+
+function connectWS() {
+  try {
+    const proto = location.protocol === "https:" ? "wss://" : "ws://";
+    ws = new WebSocket(proto + location.host + "/ws");
+  } catch (e) {
+    startPolling();
+    return;
+  }
+  ws.onopen = () => { setLink("WS", "on"); stopPolling(); wsRetry = 1000; };
+  ws.onmessage = ev => {
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.type === "status") renderStatus(m);
+    } catch (e) {}
+  };
+  ws.onclose = () => {
+    setLink("polling", "");
+    startPolling();
+    setTimeout(connectWS, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 15000);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+// --- Charge/balance cycle log (GET /api/balance) ---
+const BALANCE_THRESHOLD_MV = 30;
+const BALANCE_TABLE_ROWS = 20;
+
+function cellKeysOf(point) {
+  return Object.keys(point || {})
+    .filter(k => /^cell\d+_v$/.test(k))
+    .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+}
+
+function drawBalanceChart(points) {
+  const canvas = document.getElementById("balance-chart");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const padL = 56, padR = 12, padT = 14, padB = 28;
+  ctx.clearRect(0, 0, W, H);
+  const info = document.getElementById("balance-info");
+
+  if (!points || points.length === 0) {
+    ctx.fillStyle = "#8b96ad";
+    ctx.font = "13px system-ui";
+    ctx.fillText("Sin datos del ciclo de balanceo", padL, H / 2);
+    info.textContent = "";
+    return;
+  }
+
+  const vals = points.map(p => p.delta_mv || 0);
+  let min = Math.min.apply(null, vals.concat([BALANCE_THRESHOLD_MV]));
+  let max = Math.max.apply(null, vals.concat([BALANCE_THRESHOLD_MV]));
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  min -= span * 0.08;
+  max += span * 0.08;
+
+  const x = i => padL + (points.length === 1 ? 0 : (i / (points.length - 1)) * (W - padL - padR));
+  const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+
+  ctx.strokeStyle = "#263049";
+  ctx.fillStyle = "#8b96ad";
+  ctx.font = "11px system-ui";
+  ctx.lineWidth = 1;
+  for (let t = 0; t <= 4; t++) {
+    const v = min + (t / 4) * (max - min);
+    const yy = y(v);
+    ctx.beginPath();
+    ctx.moveTo(padL, yy);
+    ctx.lineTo(W - padR, yy);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(0), 6, yy + 4);
+  }
+
+  // Threshold line (balance start delta).
+  const ty = y(BALANCE_THRESHOLD_MV);
+  ctx.strokeStyle = "#ffc857";
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(padL, ty);
+  ctx.lineTo(W - padR, ty);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#ffc857";
+  ctx.fillText(BALANCE_THRESHOLD_MV + " mV", padL + 4, ty - 4);
+
+  // Delta between cells.
+  ctx.strokeStyle = "#4da3ff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const px = x(i), py = y(p.delta_mv || 0);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+
+  // Mark samples where balancing was reported (reg12 != 0).
+  ctx.fillStyle = "#39d98a";
+  points.forEach((p, i) => {
+    if ((p.reg12_balance || 0) !== 0) {
+      ctx.beginPath();
+      ctx.arc(x(i), y(p.delta_mv || 0), 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  });
+
+  ctx.fillStyle = "#8b96ad";
+  ctx.fillText(points[0].ts || "", padL, H - 8);
+  const last = points[points.length - 1].ts || "";
+  ctx.fillText(last, W - padR - ctx.measureText(last).width, H - 8);
+
+  info.textContent = points.length + " muestras · Δ max " +
+    Math.max.apply(null, vals) + " mV · umbral " + BALANCE_THRESHOLD_MV + " mV";
+}
+
+function renderBalanceTable(points) {
+  const table = document.getElementById("balance-table");
+  if (!points || points.length === 0) {
+    table.innerHTML = '<tbody><tr><td class="muted">Sin datos</td></tr></tbody>';
+    return;
+  }
+  const cellKeys = cellKeysOf(points[points.length - 1]);
+  const head = ["Hora"].concat(cellKeys.map(k => "C" + k.match(/\d+/)[0]))
+    .concat(["ΔmV", "reg12", "reg13", "warn", "prot"]);
+  let html = "<thead><tr>" + head.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
+  points.slice(-BALANCE_TABLE_ROWS).reverse().forEach(p => {
+    const bal = (p.reg12_balance || 0) !== 0;
+    const style = bal ? ' style="background:rgba(57,217,138,.15)"' : "";
+    const t = (p.ts || "").split(" ")[1] || p.ts || "";
+    html += "<tr" + style + "><td>" + t + "</td>";
+    cellKeys.forEach(k => { html += "<td>" + fmt(p[k], 3) + "</td>"; });
+    html += "<td>" + fmt(p.delta_mv, 0) + "</td>";
+    html += "<td>" + (p.reg12_balance || 0) + "</td>";
+    html += "<td>" + (p.reg13 || 0) + "</td>";
+    html += "<td>" + (p.warn_hex || "—") + "</td>";
+    html += "<td>" + (p.prot_hex || "—") + "</td></tr>";
+  });
+  table.innerHTML = html + "</tbody>";
+}
+
+async function refreshBalance() {
+  try {
+    const payload = await fetchJSON("/api/balance?limit=500");
+    const points = payload.points || [];
+    drawBalanceChart(points);
+    renderBalanceTable(points);
+  } catch (e) {
+    drawBalanceChart([]);
+    renderBalanceTable([]);
+    document.getElementById("balance-info").textContent = "API no disponible";
+  }
+}
+
 refreshStatus();
+refreshConfig();
 refreshHistory();
-setInterval(refreshStatus, 2000);
+refreshBalance();
+startPolling();
+connectWS();
 setInterval(refreshHistory, 10000);
+setInterval(refreshConfig, 60000);
+setInterval(refreshBalance, 10000);
 </script>
 </body>
 </html>

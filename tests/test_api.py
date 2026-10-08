@@ -5,15 +5,20 @@ from typing import List, Optional
 import pytest
 
 from src.modules.bms.domain.models.reading import BmsReading
+from src.modules.bms.domain.models.config import BmsConfig
 from src.modules.bms.domain.ports.bms_repository import BmsRepository
 from src.modules.bms.infrastructure.entrypoints.flask_app import create_app
 
 
 class FakeBmsRepository(BmsRepository):
     def __init__(self, reading: Optional[BmsReading] = None,
-                 history: Optional[dict] = None) -> None:
+                 history: Optional[dict] = None,
+                 config: Optional[BmsConfig] = None,
+                 balance: Optional[List[dict]] = None) -> None:
         self.reading = reading
         self.history = history or {}
+        self.config = config
+        self.balance = balance or []
         self.calls: List[tuple] = []
 
     async def get_latest_reading(self) -> Optional[BmsReading]:
@@ -22,6 +27,12 @@ class FakeBmsRepository(BmsRepository):
     async def get_history(self, metric: str, limit: int) -> List[dict]:
         self.calls.append((metric, limit))
         return self.history.get(metric, [])[:limit]
+
+    async def get_config(self) -> Optional[BmsConfig]:
+        return self.config
+
+    async def get_balance_log(self, limit: int) -> List[dict]:
+        return self.balance[:limit]
 
     async def connect(self) -> bool:
         return True
@@ -40,7 +51,28 @@ def sample_reading() -> BmsReading:
         cap_design_ah=120,
         cycles=42,
         cell_voltages_v=[3.31, 3.30, 3.32, 3.31],
+        cell_temperatures_c=[25.0, 25.5],
+        mosfet_temperature_c=31.0,
+        ambient_temperature_c=28.0,
+        extra_temperatures_c=[30.5, 31.8],
+        balance_status=0b0001,
+        warning_flags=0x0001,
+        protection_flags=0x0000,
+        status_flags=0x0C00,
+        power_w=-19.86,
         timestamp=datetime(2026, 10, 8, 12, 0, 0),
+    )
+
+
+def sample_config() -> BmsConfig:
+    return BmsConfig(
+        pack_ov_alarm_v=14.0,
+        pack_ov_protection_v=14.6,
+        cell_ov_protection_v=3.65,
+        balance_start_cell_v=3.4,
+        balance_start_delta_mv=30,
+        soc_alarm_pct=5,
+        raw_registers=[0] * 55,
     )
 
 
@@ -48,6 +80,7 @@ def sample_reading() -> BmsReading:
 def fake_repo() -> FakeBmsRepository:
     return FakeBmsRepository(
         reading=sample_reading(),
+        config=sample_config(),
         history={
             "voltage": [{"ts": "2026-10-08 12:00:00", "value": 13.24}] * 3,
             "current": [{"ts": "2026-10-08 12:00:00", "value": -1.5}],
@@ -73,6 +106,38 @@ def test_status_returns_reading(client):
     assert body["data"]["cycles"] == 42
     assert body["data"]["cell_voltages_V"] == [3.31, 3.30, 3.32, 3.31]
     assert body["data"]["ts"] == "2026-10-08T12:00:00"
+
+
+def test_status_includes_new_fields(client):
+    body = client.get("/api/status").get_json()
+    data = body["data"]
+    assert data["power_W"] == -19.86
+    assert data["cell_temperatures_C"] == [25.0, 25.5]
+    assert data["mosfet_temperature_C"] == 31.0
+    assert data["ambient_temperature_C"] == 28.0
+    assert data["extra_temperatures_C"] == [30.5, 31.8]
+    assert data["balance_status"] == 0b0001
+    assert data["warning_flags"] == 0x0001
+    assert data["status_flags"] == 0x0C00
+
+
+def test_config_endpoint(client):
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["connected"] is True
+    assert body["data"]["pack_ov_alarm_V"] == 14.0
+    assert body["data"]["balance_start_delta_mV"] == 30
+    assert body["data"]["soc_alarm_pct"] == 5
+    assert len(body["data"]["raw_registers"]) == 55
+
+
+def test_config_endpoint_when_unavailable():
+    app = create_app(FakeBmsRepository(reading=None, config=None))
+    app.config.update({"TESTING": True})
+    res = app.test_client().get("/api/config")
+    assert res.status_code == 200
+    assert res.get_json() == {"connected": False, "data": None}
 
 
 def test_status_without_reading_reports_disconnected():
@@ -112,6 +177,37 @@ def test_history_limit_zero_returns_empty(client, fake_repo):
     assert res.status_code == 200
     assert res.get_json()["points"] == []
     assert fake_repo.calls[-1] == ("voltage", 0)
+
+
+def test_balance_endpoint_returns_points():
+    points = [
+        {"ts": "2026-10-08 12:00:00", "delta_mv": 120, "reg12_balance": 0, "reg13": 0},
+        {"ts": "2026-10-08 12:00:30", "delta_mv": 140, "reg12_balance": 1, "reg13": 0},
+    ]
+    repo = FakeBmsRepository(reading=sample_reading(), balance=points)
+    app = create_app(repo)
+    app.config.update({"TESTING": True})
+    res = app.test_client().get("/api/balance")
+    assert res.status_code == 200
+    assert res.get_json()["points"] == points
+
+
+def test_balance_endpoint_honors_limit():
+    repo = FakeBmsRepository(reading=sample_reading(),
+                             balance=[{"ts": "x", "delta_mv": i} for i in range(5)])
+    app = create_app(repo)
+    app.config.update({"TESTING": True})
+    res = app.test_client().get("/api/balance?limit=2")
+    assert res.status_code == 200
+    assert len(res.get_json()["points"]) == 2
+
+
+def test_balance_endpoint_empty_when_unavailable():
+    app = create_app(FakeBmsRepository(reading=None))
+    app.config.update({"TESTING": True})
+    res = app.test_client().get("/api/balance")
+    assert res.status_code == 200
+    assert res.get_json() == {"points": []}
 
 
 def test_dashboard_served_at_root(client):

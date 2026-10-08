@@ -1,4 +1,5 @@
 import asyncio
+import struct
 
 from src.modules.bms.infrastructure.adapters.bleak_bms_repository import (
     FUNC_READ,
@@ -6,11 +7,11 @@ from src.modules.bms.infrastructure.adapters.bleak_bms_repository import (
     ModbusCollector,
 )
 
-# Real 123-byte status response captured from the BMS (4S LiFePO4, SoC 69%).
+# Real 123-byte status response captured live from the BMS (4S LiFePO4, SoC 69%).
 REAL_FRAME_HEX = (
-    "0103760000053200450064164f2021232800860000000000000c0000000000c00000040cff0d00"
-    "0d000cfc00000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000101350000000000000000000000000000000000000135ffff444e"
+    "0103760000053200450064164c2021232800860000000000000c0000000000c00000040cff0d00"
+    "0d000cfd00000000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000000010131000000000000000000000000000000000000000131ffff1a05"
 )
 
 SLAVE = 0x01
@@ -92,9 +93,71 @@ def test_parse_status_reads_pack_and_cell_voltages():
     assert reading.voltage_v == 13.3
     assert reading.soc_pct == 69
     assert reading.cycles == 134
-    assert reading.cap_remain_ah == 57.11
+    assert reading.cap_remain_ah == 57.08
     assert reading.cap_design_ah == 82.25
-    assert [round(v, 3) for v in reading.cell_voltages_v] == [3.327, 3.328, 3.328, 3.324]
+    assert [round(v, 3) for v in reading.cell_voltages_v] == [3.327, 3.328, 3.328, 3.325]
+
+
+def build_status_frame(regs: dict) -> bytes:
+    """Build a complete 123-byte status response with the given register values."""
+    repo = BleakBmsRepository()
+    payload = bytearray(BYTE_COUNT)
+    for regno, value in regs.items():
+        struct.pack_into(">H", payload, regno * 2, value & 0xFFFF)
+    body = bytes([SLAVE, FUNC_READ, BYTE_COUNT]) + bytes(payload)
+    crc = repo._crc_modbus(body)
+    return body + struct.pack("<H", crc)
+
+
+def test_parse_status_temperatures():
+    # Documented offsets (reg32..37) and the live offsets this firmware actually uses
+    # (reg47, reg57) both parse as 0.1 C.
+    repo = BleakBmsRepository()
+    frame = build_status_frame({32: 250, 33: 255, 34: 248, 35: 252, 36: 310, 37: 280, 47: 305, 57: 318})
+    reading = repo._parse_status(frame[3:-2])
+
+    assert reading.cell_temperatures_c == [25.0, 25.5, 24.8, 25.2]
+    assert reading.mosfet_temperature_c == 31.0
+    assert reading.ambient_temperature_c == 28.0
+    assert reading.extra_temperatures_c == [30.5, 31.8]
+
+
+def test_parse_status_flags_balance_and_power():
+    repo = BleakBmsRepository()
+    # current = -150 (signed) -> -1.50 A, voltage = 1330 -> 13.30 V
+    frame = build_status_frame({0: (-150) & 0xFFFF, 1: 1330, 9: 0x0001, 10: 0x0004, 11: 0x0C00, 12: 0b0101})
+    reading = repo._parse_status(frame[3:-2])
+
+    assert reading.current_a == -1.5
+    assert reading.warning_flags == 0x0001
+    assert reading.protection_flags == 0x0004
+    assert reading.status_flags == 0x0C00
+    assert reading.balance_status == 0b0101
+    assert abs(reading.power_w - (13.30 * -1.5)) < 1e-9
+
+
+def test_parse_config_reads_thresholds():
+    repo = BleakBmsRepository()
+    regs = {83: 1400, 84: 1460, 87: 3500, 88: 3650, 92: 1000, 96: 2500,
+            99: 115, 100: 120, 107: 550, 128: 3400, 129: 30, 130: 1400,
+            132: 2800, 133: 60, 135: 5}
+    payload = bytearray(55 * 2)
+    for regno, value in regs.items():
+        struct.pack_into(">H", payload, (regno - 83) * 2, value)
+    cfg = repo._parse_config(bytes(payload))
+
+    assert cfg.pack_ov_alarm_v == 14.0
+    assert cfg.pack_ov_protection_v == 14.6
+    assert cfg.cell_ov_protection_v == 3.65
+    assert cfg.pack_uv_protection_v == 10.0
+    assert cfg.cell_uv_protection_v == 2.5
+    assert cfg.charge_oc_alarm_a == 115
+    assert cfg.charge_ot_alarm_c == 55.0
+    assert cfg.balance_start_cell_v == 3.4
+    assert cfg.balance_start_delta_mv == 30
+    assert cfg.pack_full_charge_v == 14.0
+    assert cfg.soc_alarm_pct == 5
+    assert len(cfg.raw_registers) == 55
 
 
 def test_disconnect_releases_the_ble_client():
