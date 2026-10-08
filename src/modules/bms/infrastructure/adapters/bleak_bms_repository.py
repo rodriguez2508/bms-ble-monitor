@@ -128,7 +128,7 @@ class BleakBmsRepository(BmsRepository):
         def reg_signed(offset: int) -> int: return struct.unpack_from(">h", data, offset * 2)[0]
         cells = []
         cell_count = reg(15) & 0xFF if len(data) > 31 else 0
-        base = 35
+        base = 32  # cell voltages start at register 16 (byte 32), big-endian millivolts
         for i in range(min(cell_count, 32)):
             if base + i * 2 + 2 <= len(data):
                 mv = struct.unpack_from(">H", data, base + i * 2)[0]

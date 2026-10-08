@@ -2,7 +2,15 @@ import asyncio
 
 from src.modules.bms.infrastructure.adapters.bleak_bms_repository import (
     FUNC_READ,
+    BleakBmsRepository,
     ModbusCollector,
+)
+
+# Real 123-byte status response captured from the BMS (4S LiFePO4, SoC 69%).
+REAL_FRAME_HEX = (
+    "0103760000053200450064164f2021232800860000000000000c0000000000c00000040cff0d00"
+    "0d000cfc00000000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000101350000000000000000000000000000000000000135ffff444e"
 )
 
 SLAVE = 0x01
@@ -72,6 +80,19 @@ def test_garbage_fragment_without_header_is_discarded():
     frame = build_frame()
     feed_fragments(collector, frame)
     assert collector._frame == frame
+
+
+def test_parse_status_reads_pack_and_cell_voltages():
+    # The cell voltages start at register 16 (byte 32); a wrong offset reads misaligned
+    # garbage (e.g. 64.512 V) instead of the real ~3.3 V per cell.
+    repo = BleakBmsRepository()
+    frame = bytes.fromhex(REAL_FRAME_HEX)
+    reading = repo._parse_status(frame[3:-2])
+
+    assert reading.voltage_v == 13.3
+    assert reading.soc_pct == 69
+    assert reading.cycles == 134
+    assert [round(v, 3) for v in reading.cell_voltages_v] == [3.327, 3.328, 3.328, 3.324]
 
 
 def test_request_timeout_clears_residual_so_next_frame_assembles():
