@@ -18,38 +18,62 @@ REG_STATUS_START = 0x0000
 REG_STATUS_COUNT = 0x003B
 
 class ModbusCollector:
+    """Reassembles a Modbus RTU response that BLE delivers fragmented.
+
+    On Linux the ATT MTU is 23, so the usable payload per notification is 20 bytes.
+    A status response is 123 bytes (slave+func+byteCount+118 data+CRC), therefore it
+    arrives split across ~7 notifications. We MUST NOT guess "header vs continuation"
+    from the bytes, because payload values can also look like a header (e.g. 01 03).
+    """
+
     def __init__(self, slave_addr):
         self.slave_addr = slave_addr
         self._buf: bytearray = bytearray()
         self._event: asyncio.Event = asyncio.Event()
         self._frame: bytes | None = None
+        self._in_frame: bool = False
+
+    def _reset(self) -> None:
+        self._buf = bytearray()
+        self._in_frame = False
 
     def handle_notify(self, _sender, data: bytearray) -> None:
-        if len(data) >= 2 and data[0] == self.slave_addr and data[1] in (FUNC_READ, FUNC_READ | 0x80):
-            self._buf = bytearray(data)
-        elif self._buf: self._buf.extend(data)
-        else: return
+        # Explicit state machine: only a real header starts a frame. Once in frame we
+        # always accumulate; we never restart the buffer on a byte coincidence.
+        if not self._in_frame:
+            if len(data) >= 2 and data[0] == self.slave_addr and data[1] in (FUNC_READ, FUNC_READ | 0x80):
+                self._buf = bytearray(data)
+                self._in_frame = True
+            else:
+                return  # stray fragment without header -> discard
+        else:
+            self._buf.extend(data)
 
-        if len(self._buf) < 5: return
+        if len(self._buf) < 5:
+            return
+        # Modbus exception response (0x83): reset and wait for the next header.
         if self._buf[1] == (FUNC_READ | 0x80):
-            self._buf.clear()
+            self._reset()
             return
 
         expected = 5 + self._buf[2]
-        if len(self._buf) < expected: return
+        if len(self._buf) < expected:
+            return
 
-        frame = bytes(self._buf[:expected])
-        self._frame = frame
+        self._frame = bytes(self._buf[:expected])
         self._event.set()
-        self._buf.clear()
+        self._reset()
 
     async def request(self, client, cmd: bytes, timeout: float = 5.0) -> bytes | None:
         self._frame = None
         self._event.clear()
+        self._reset()  # start each request with a clean reassembly state
         await client.write_gatt_char(UUID_TX, cmd, response=False)
         try:
             await asyncio.wait_for(self._event.wait(), timeout)
-        except asyncio.TimeoutError: return None
+        except asyncio.TimeoutError:
+            self._reset()  # drop residual so a lost frame does not contaminate the next one
+            return None
         return self._frame
 
 class BleakBmsRepository(BmsRepository):
@@ -128,6 +152,14 @@ class BleakBmsRepository(BmsRepository):
                 collector = ModbusCollector(config.BMS_SLAVE_ADDR)
                 async with BleakClient(device, timeout=20.0) as client:
                     print(f"[BLE] Conectado a BMS BUKUNGO")
+                    # MTU is best-effort only: on Linux/bleak 3.0.1 it cannot be negotiated
+                    # (request_mtu was removed, BlueZ reports 23). Its failure must never
+                    # break the read path -- fragmentation is handled by ModbusCollector.
+                    try:
+                        mtu = getattr(client, "mtu_size", None)
+                        print(f"[BLE] MTU efectivo: {mtu} (fragmentacion asumida)")
+                    except Exception as mtu_err:
+                        print(f"[BLE] MTU no disponible ({type(mtu_err).__name__}); continuo con fragmentacion")
                     await client.start_notify(UUID_RX, collector.handle_notify)
                     self._is_connected = True
                     backoff = 5
@@ -142,7 +174,7 @@ class BleakBmsRepository(BmsRepository):
                             self._save_reading("soc",     reading.soc_pct)
                         await asyncio.sleep(config.BMS_POLLING_INTERVAL)
             except Exception as e:
-                print(f"[BLE] Error: {e}. Reintentando en {backoff}s...")
+                print(f"[BLE] Error: {type(e).__name__}: {e!r}. Reintentando en {backoff}s...")
                 self._is_connected = False
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
