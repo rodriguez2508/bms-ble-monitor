@@ -41,6 +41,71 @@ class FakeBmsRepository(BmsRepository):
         return None
 
 
+class FakePushService:
+    def __init__(self) -> None:
+        self.public_key = "FAKEKEY"
+        self.subs: List[dict] = []
+        self.sent: List[tuple] = []
+
+    def subscribe(self, subscription: dict) -> bool:
+        self.subs.append(subscription)
+        return True
+
+    def unsubscribe(self, endpoint: str) -> None:
+        self.subs = [s for s in self.subs if s.get("endpoint") != endpoint]
+
+    def send(self, title: str, body: str, data=None) -> int:
+        self.sent.append((title, body))
+        return len(self.subs)
+
+
+class FakeSocAlert:
+    def __init__(self, threshold: float = 10.0, high_threshold: float = 95.0) -> None:
+        self._threshold = threshold
+        self._high_threshold = high_threshold
+        self.fired = False
+        self.fired_high = False
+
+    def get_threshold(self) -> float:
+        return self._threshold
+
+    def get_high_threshold(self) -> float:
+        return self._high_threshold
+
+    def set_threshold(self, pct: float) -> float:
+        self._threshold = float(pct)
+        self.fired = False
+        return self._threshold
+
+    def set_high_threshold(self, pct: float) -> float:
+        self._high_threshold = float(pct)
+        self.fired_high = False
+        return self._high_threshold
+
+    def status(self) -> dict:
+        return {
+            "soc_alert_pct": self._threshold,
+            "soc_high_alert_pct": self._high_threshold,
+            "fired": self.fired,
+            "fired_high": self.fired_high,
+            "last_soc": None,
+        }
+
+    def evaluate(self, reading) -> bool:
+        return False
+
+
+def build_client(repo, push=None, alert=None):
+    app = create_app(
+        repo,
+        push_service=push or FakePushService(),
+        soc_alert=alert or FakeSocAlert(),
+        start_watcher=False,
+    )
+    app.config.update({"TESTING": True})
+    return app.test_client()
+
+
 def sample_reading() -> BmsReading:
     return BmsReading(
         voltage_v=13.24,
@@ -90,9 +155,7 @@ def fake_repo() -> FakeBmsRepository:
 
 @pytest.fixture
 def client(fake_repo):
-    app = create_app(fake_repo)
-    app.config.update({"TESTING": True})
-    return app.test_client()
+    return build_client(fake_repo)
 
 
 def test_status_returns_reading(client):
@@ -133,17 +196,13 @@ def test_config_endpoint(client):
 
 
 def test_config_endpoint_when_unavailable():
-    app = create_app(FakeBmsRepository(reading=None, config=None))
-    app.config.update({"TESTING": True})
-    res = app.test_client().get("/api/config")
+    res = build_client(FakeBmsRepository(reading=None, config=None)).get("/api/config")
     assert res.status_code == 200
     assert res.get_json() == {"connected": False, "data": None}
 
 
 def test_status_without_reading_reports_disconnected():
-    app = create_app(FakeBmsRepository(reading=None))
-    app.config.update({"TESTING": True})
-    res = app.test_client().get("/api/status")
+    res = build_client(FakeBmsRepository(reading=None)).get("/api/status")
     assert res.status_code == 200
     body = res.get_json()
     assert body == {"connected": False, "data": None}
@@ -185,9 +244,7 @@ def test_balance_endpoint_returns_points():
         {"ts": "2026-10-08 12:00:30", "delta_mv": 140, "reg12_balance": 1, "reg13": 0},
     ]
     repo = FakeBmsRepository(reading=sample_reading(), balance=points)
-    app = create_app(repo)
-    app.config.update({"TESTING": True})
-    res = app.test_client().get("/api/balance")
+    res = build_client(repo).get("/api/balance")
     assert res.status_code == 200
     assert res.get_json()["points"] == points
 
@@ -195,19 +252,63 @@ def test_balance_endpoint_returns_points():
 def test_balance_endpoint_honors_limit():
     repo = FakeBmsRepository(reading=sample_reading(),
                              balance=[{"ts": "x", "delta_mv": i} for i in range(5)])
-    app = create_app(repo)
-    app.config.update({"TESTING": True})
-    res = app.test_client().get("/api/balance?limit=2")
+    res = build_client(repo).get("/api/balance?limit=2")
     assert res.status_code == 200
     assert len(res.get_json()["points"]) == 2
 
 
 def test_balance_endpoint_empty_when_unavailable():
-    app = create_app(FakeBmsRepository(reading=None))
-    app.config.update({"TESTING": True})
-    res = app.test_client().get("/api/balance")
+    res = build_client(FakeBmsRepository(reading=None)).get("/api/balance")
     assert res.status_code == 200
     assert res.get_json() == {"points": []}
+
+
+def test_push_public_key(client):
+    res = client.get("/api/push/public_key")
+    assert res.status_code == 200
+    assert res.get_json() == {"key": "FAKEKEY"}
+
+
+def test_push_subscribe(client):
+    res = client.post("/api/push/subscribe", json={"endpoint": "https://x/1", "keys": {}})
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+
+
+def test_alerts_config_get_and_post(client):
+    assert client.get("/api/alerts/config").get_json()["soc_alert_pct"] == 10.0
+    res = client.post("/api/alerts/config", json={"soc_alert_pct": 15})
+    assert res.get_json()["soc_alert_pct"] == 15.0
+    assert client.get("/api/alerts/config").get_json()["soc_alert_pct"] == 15.0
+
+
+def test_alerts_config_invalid(client):
+    res = client.post("/api/alerts/config", json={"soc_alert_pct": "abc"})
+    assert res.status_code == 400
+
+
+def test_alerts_config_high_threshold(client):
+    assert client.get("/api/alerts/config").get_json()["soc_high_alert_pct"] == 95.0
+    res = client.post("/api/alerts/config", json={"soc_high_alert_pct": 90})
+    assert res.get_json()["soc_high_alert_pct"] == 90.0
+    assert client.get("/api/alerts/config").get_json()["soc_high_alert_pct"] == 90.0
+
+
+def test_alerts_config_missing_both_is_400(client):
+    res = client.post("/api/alerts/config", json={})
+    assert res.status_code == 400
+
+
+def test_service_worker_served(client):
+    res = client.get("/sw.js")
+    assert res.status_code == 200
+    assert "javascript" in res.mimetype
+
+
+def test_app_js_served(client):
+    res = client.get("/app.js")
+    assert res.status_code == 200
+    assert "javascript" in res.mimetype
 
 
 def test_dashboard_served_at_root(client):
