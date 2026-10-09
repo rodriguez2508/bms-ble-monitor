@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 data/
+node_modules
+.pi/
+.fleet-lock

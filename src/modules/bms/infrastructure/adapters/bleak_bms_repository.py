@@ -9,6 +9,8 @@ from typing import Optional, List
 from bleak import BleakClient, BleakScanner, BleakError
 from src.modules.bms.domain.ports.bms_repository import BmsRepository
 from src.modules.bms.domain.models.reading import BmsReading
+from src.modules.bms.domain.models.config import BmsConfig
+from src.modules.bms.infrastructure.adapters.balance_log import BalanceLog
 from src.modules.shared.infrastructure.config.config import config
 
 UUID_TX = "00002760-08c2-11e1-9073-0e8ac72e0001"
@@ -16,67 +18,140 @@ UUID_RX = "00002760-08c2-11e1-9073-0e8ac72e0002"
 FUNC_READ = 0x03
 REG_STATUS_START = 0x0000
 REG_STATUS_COUNT = 0x003B
+# Parameter/threshold block. This firmware shifts the PACE parameter map by +23
+# registers, so the read covers registers 83..137 inclusive.
+REG_PARAM_START = 83
+REG_PARAM_COUNT = 55
+PARAM_REFRESH_POLLS = 10  # refresh cached thresholds every N status polls
 
 class ModbusCollector:
+    """Reassembles a Modbus RTU response that BLE delivers fragmented.
+
+    On Linux the ATT MTU is 23, so the usable payload per notification is 20 bytes.
+    A status response is 123 bytes (slave+func+byteCount+118 data+CRC), therefore it
+    arrives split across ~7 notifications. We MUST NOT guess "header vs continuation"
+    from the bytes, because payload values can also look like a header (e.g. 01 03).
+    """
+
     def __init__(self, slave_addr):
         self.slave_addr = slave_addr
         self._buf: bytearray = bytearray()
         self._event: asyncio.Event = asyncio.Event()
         self._frame: bytes | None = None
+        self._in_frame: bool = False
+
+    def _reset(self) -> None:
+        self._buf = bytearray()
+        self._in_frame = False
 
     def handle_notify(self, _sender, data: bytearray) -> None:
-        if len(data) >= 2 and data[0] == self.slave_addr and data[1] in (FUNC_READ, FUNC_READ | 0x80):
-            self._buf = bytearray(data)
-        elif self._buf: self._buf.extend(data)
-        else: return
+        # Explicit state machine: only a real header starts a frame. Once in frame we
+        # always accumulate; we never restart the buffer on a byte coincidence.
+        if not self._in_frame:
+            if len(data) >= 2 and data[0] == self.slave_addr and data[1] in (FUNC_READ, FUNC_READ | 0x80):
+                self._buf = bytearray(data)
+                self._in_frame = True
+            else:
+                return  # stray fragment without header -> discard
+        else:
+            self._buf.extend(data)
 
-        if len(self._buf) < 5: return
+        if len(self._buf) < 5:
+            return
+        # Modbus exception response (0x83): reset and wait for the next header.
         if self._buf[1] == (FUNC_READ | 0x80):
-            self._buf.clear()
+            self._reset()
             return
 
         expected = 5 + self._buf[2]
-        if len(self._buf) < expected: return
+        if len(self._buf) < expected:
+            return
 
-        frame = bytes(self._buf[:expected])
-        self._frame = frame
+        self._frame = bytes(self._buf[:expected])
         self._event.set()
-        self._buf.clear()
+        self._reset()
 
     async def request(self, client, cmd: bytes, timeout: float = 5.0) -> bytes | None:
         self._frame = None
         self._event.clear()
+        self._reset()  # start each request with a clean reassembly state
         await client.write_gatt_char(UUID_TX, cmd, response=False)
         try:
             await asyncio.wait_for(self._event.wait(), timeout)
-        except asyncio.TimeoutError: return None
+        except asyncio.TimeoutError:
+            self._reset()  # drop residual so a lost frame does not contaminate the next one
+            return None
         return self._frame
 
 class BleakBmsRepository(BmsRepository):
     def __init__(self):
         self._latest_reading: Optional[BmsReading] = None
+        self._config: Optional[BmsConfig] = None
         self._is_connected = False
         self._lock = threading.Lock()
         self._stop_event = asyncio.Event()
+        self._client: Optional[BleakClient] = None
+        self._balance_log: Optional[BalanceLog] = (
+            BalanceLog(
+                os.path.join(config.DATA_DIR, config.BALANCE_LOG_FILE),
+                config.BALANCE_LOG_RETENTION_H,
+            )
+            if config.BALANCE_LOG_ENABLED
+            else None
+        )
 
     async def connect(self) -> bool: return True
-    async def disconnect(self) -> None: self._stop_event.set()
+
+    def request_stop(self) -> None:
+        # Signal the polling loop to stop. Call it on the BLE event loop
+        # (e.g. via loop.call_soon_threadsafe) since asyncio.Event is not thread-safe.
+        self._stop_event.set()
+
+    async def disconnect(self) -> None:
+        # Release the BLE link so the BMS resumes advertising; otherwise it stays
+        # connected and the next start fails to find it ("no encontrado").
+        self._stop_event.set()
+        client = self._client
+        if client is not None:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception as e:
+                print(f"[BLE] Error al desconectar: {type(e).__name__}: {e!r}")
+        self._client = None
+        self._is_connected = False
 
     async def get_latest_reading(self) -> Optional[BmsReading]:
         with self._lock: return self._latest_reading
 
+    async def get_config(self) -> Optional[BmsConfig]:
+        with self._lock: return self._config
+
+    async def get_balance_log(self, limit: int) -> List[dict]:
+        if self._balance_log is None:
+            return []
+        return self._balance_log.read(limit)
+
     async def get_history(self, metric: str, limit: int) -> List[dict]:
-        filename_map = {"voltage": "voltage_history.csv", "current": "current_history.csv", "soc": "soc_history.csv"}
+        filename_map = {"voltage": "voltage_history.csv", "current": "current_history.csv",
+                        "soc": "soc_history.csv", "power": "power_history.csv"}
         filename = filename_map.get(metric)
         if not filename: return []
+        if limit <= 0: return []
         path = os.path.join(config.DATA_DIR, filename)
         points = []
         if os.path.exists(path):
             with open(path, newline="") as f:
                 rows = list(csv.reader(f))
-            for ts, val in rows[-limit:]:
-                try: points.append({"ts": ts, "value": float(val)})
-                except ValueError: pass
+            for row in rows[-limit:]:
+                try:
+                    ts, val = row
+                except ValueError:
+                    continue
+                try:
+                    points.append({"ts": ts, "value": float(val)})
+                except ValueError:
+                    continue
         return points
 
     def _crc_modbus(self, data: bytes) -> int:
@@ -95,14 +170,69 @@ class BleakBmsRepository(BmsRepository):
     def _parse_status(self, data: bytes) -> BmsReading:
         def reg(offset: int) -> int: return struct.unpack_from(">H", data, offset * 2)[0]
         def reg_signed(offset: int) -> int: return struct.unpack_from(">h", data, offset * 2)[0]
+        def has(offset: int) -> bool: return offset * 2 + 2 <= len(data)
+
         cells = []
         cell_count = reg(15) & 0xFF if len(data) > 31 else 0
-        base = 35
+        base = 32  # cell voltages start at register 16 (byte 32), big-endian millivolts
         for i in range(min(cell_count, 32)):
             if base + i * 2 + 2 <= len(data):
                 mv = struct.unpack_from(">H", data, base + i * 2)[0]
                 cells.append(mv / 1000)
-        return BmsReading(current_a=reg_signed(0) / 100, voltage_v=reg(1) / 100, soc_pct=reg(2), soh_pct=reg(3), cap_remain_ah=reg(4) / 100, cap_design_ah=reg(5) // 100, cycles=reg(7), cell_voltages_v=cells)
+
+        # Temperatures are 0.1 C. The published map puts them at reg32..37, but this
+        # firmware reports the live values at reg47 and reg57; we surface whichever
+        # registers actually carry a reading (0 means "no sensor").
+        cell_temps = [reg_signed(o) / 10 for o in range(32, 36) if has(o) and reg_signed(o) != 0]
+        mosfet_temp = reg_signed(36) / 10 if has(36) and reg_signed(36) != 0 else 0.0
+        ambient_temp = reg_signed(37) / 10 if has(37) and reg_signed(37) != 0 else 0.0
+        extra_temps = [reg_signed(o) / 10 for o in (47, 57) if has(o) and reg_signed(o) != 0]
+
+        voltage_v = reg(1) / 100
+        current_a = reg_signed(0) / 100
+        return BmsReading(
+            current_a=current_a,
+            voltage_v=voltage_v,
+            soc_pct=reg(2),
+            soh_pct=reg(3),
+            cap_remain_ah=reg(4) / 100,
+            cap_design_ah=reg(5) / 100,
+            cycles=reg(7),
+            cell_voltages_v=cells,
+            cell_temperatures_c=cell_temps,
+            mosfet_temperature_c=mosfet_temp,
+            ambient_temperature_c=ambient_temp,
+            extra_temperatures_c=extra_temps,
+            balance_status=reg(12) if has(12) else 0,
+            warning_flags=reg(9) if has(9) else 0,
+            protection_flags=reg(10) if has(10) else 0,
+            status_flags=reg(11) if has(11) else 0,
+            power_w=voltage_v * current_a,
+        )
+
+    def _parse_config(self, data: bytes) -> BmsConfig:
+        def reg(regno: int) -> int:
+            off = (regno - REG_PARAM_START) * 2
+            return struct.unpack_from(">H", data, off)[0]
+        raw = [reg(REG_PARAM_START + i) for i in range(REG_PARAM_COUNT)]
+        return BmsConfig(
+            pack_ov_alarm_v=reg(83) / 100,
+            pack_ov_protection_v=reg(84) / 100,
+            cell_ov_alarm_v=reg(87) / 1000,
+            cell_ov_protection_v=reg(88) / 1000,
+            pack_uv_protection_v=reg(92) / 100,
+            cell_uv_protection_v=reg(96) / 1000,
+            charge_oc_alarm_a=reg(99),
+            charge_oc_protection_a=reg(100),
+            charge_ot_alarm_c=reg(107) / 10,
+            balance_start_cell_v=reg(128) / 1000,
+            balance_start_delta_mv=reg(129),
+            pack_full_charge_v=reg(130) / 100,
+            cell_sleep_v=reg(132) / 1000,
+            cell_sleep_delay_min=reg(133),
+            soc_alarm_pct=reg(135),
+            raw_registers=raw,
+        )
 
     def _save_reading(self, name: str, value: float):
         os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -112,7 +242,10 @@ class BleakBmsRepository(BmsRepository):
 
     async def start_polling(self):
         cmd = self._build_read_cmd(config.BMS_SLAVE_ADDR, REG_STATUS_START, REG_STATUS_COUNT)
+        param_cmd = self._build_read_cmd(config.BMS_SLAVE_ADDR, REG_PARAM_START, REG_PARAM_COUNT)
+        log_every = max(1, round(config.BALANCE_LOG_INTERVAL / config.BMS_POLLING_INTERVAL))
         backoff = 5
+        polls = 0
         while not self._stop_event.is_set():
             try:
                 print(f"[BLE] Buscando {config.BMS_MAC_ADDRESS}...")
@@ -120,7 +253,16 @@ class BleakBmsRepository(BmsRepository):
                 if not device: raise BleakError("BMS no encontrado")
                 collector = ModbusCollector(config.BMS_SLAVE_ADDR)
                 async with BleakClient(device, timeout=20.0) as client:
+                    self._client = client
                     print(f"[BLE] Conectado a BMS BUKUNGO")
+                    # MTU is best-effort only: on Linux/bleak 3.0.1 it cannot be negotiated
+                    # (request_mtu was removed, BlueZ reports 23). Its failure must never
+                    # break the read path -- fragmentation is handled by ModbusCollector.
+                    try:
+                        mtu = getattr(client, "mtu_size", None)
+                        print(f"[BLE] MTU efectivo: {mtu} (fragmentacion asumida)")
+                    except Exception as mtu_err:
+                        print(f"[BLE] MTU no disponible ({type(mtu_err).__name__}); continuo con fragmentacion")
                     await client.start_notify(UUID_RX, collector.handle_notify)
                     self._is_connected = True
                     backoff = 5
@@ -133,9 +275,26 @@ class BleakBmsRepository(BmsRepository):
                             self._save_reading("voltage", reading.voltage_v)
                             self._save_reading("current", reading.current_a)
                             self._save_reading("soc",     reading.soc_pct)
+                            self._save_reading("power",   reading.power_w)
+                            if self._balance_log is not None and polls % log_every == 0:
+                                reg13 = (
+                                    struct.unpack_from(">H", payload, 13 * 2)[0]
+                                    if len(payload) > 27
+                                    else 0
+                                )
+                                self._balance_log.append(reading, reg13)
+                        if polls % PARAM_REFRESH_POLLS == 0:
+                            pframe = await collector.request(client, param_cmd, timeout=6.0)
+                            if pframe:
+                                cfg = self._parse_config(pframe[3:-2])
+                                with self._lock: self._config = cfg
+                        polls += 1
                         await asyncio.sleep(config.BMS_POLLING_INTERVAL)
+                # Reached only when the with-block exits cleanly (client disconnected).
+                self._client = None
+                self._is_connected = False
             except Exception as e:
-                print(f"[BLE] Error: {e}. Reintentando en {backoff}s...")
+                print(f"[BLE] Error: {type(e).__name__}: {e!r}. Reintentando en {backoff}s...")
                 self._is_connected = False
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)

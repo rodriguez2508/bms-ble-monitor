@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List
 from src.modules.bms.domain.models.reading import BmsReading
+from src.modules.bms.domain.models.config import BmsConfig
 
 class BmsRepository(ABC):
     @abstractmethod
@@ -11,3 +12,11 @@ class BmsRepository(ABC):
     async def connect(self) -> bool: pass
     @abstractmethod
     async def disconnect(self) -> None: pass
+
+    async def get_config(self) -> Optional[BmsConfig]:
+        # Non-abstract: repositories without a parameter block simply return None.
+        return None
+
+    async def get_balance_log(self, limit: int) -> List[dict]:
+        # Non-abstract: repositories without a balance log return nothing.
+        return []
